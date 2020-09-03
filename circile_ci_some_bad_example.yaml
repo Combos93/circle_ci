@@ -1,0 +1,117 @@
+version: 2.1
+orbs:
+  ruby: circleci/ruby@1.0
+
+
+jobs:
+  build:
+    docker:
+      - image: circleci/ruby:2.7.1-node
+    steps:
+      - checkout
+      - ruby/install-deps
+      # - run: bundle clean --force
+      - restore_cache:
+          keys:
+            - v1-gem-cache-{{ arch }}-{{ .Branch }}-{{ checksum "Gemfile.lock" }}
+            - v1-gem-cache-{{ arch }}-{{ .Branch }}-
+            - v1-gem-cache-{{ arch }}-
+      - run: bundle install --jobs=4 --retry=3 --path vendor/bundle
+      - save_cache:
+          paths:
+            - ./vendor/bundle
+          key: v1-gem-cache-{{ arch }}-{{ .Branch }}-{{ checksum "Gemfile.lock" }}
+  test:
+    parallelism: 1
+    docker:
+      - image: cimg/ruby:2.7.1-node
+      - image: circleci/postgres:11 
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ege-test-test
+          DEVISE_JWT_SECRET_KEY: jwtdummysecret
+
+    environment:
+      BUNDLE_JOBS: "3"
+      BUNDLE_RETRY: "3"
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      RAILS_ENV: test
+      DEVISE_JWT_SECRET_KEY: jwtdummysecret
+    steps:
+      - checkout 
+      - ruby/install-deps
+      - run: sudo apt-get install libpq-dev
+      - run:
+          name: Wait for DB
+          command: dockerize -wait tcp://localhost:5432 -timeout 1m
+      - run:
+          name: Database setup
+          command: bundle exec rails db:schema:load --trace
+                      bundle exec rails db:create --trace
+            bundle exec rails db:schema:load --trace
+      - run:
+          name: Run RSpec
+          command: bundle exec rspec
+  securities:
+    parallelism: 1
+    docker:
+      - image: cimg/ruby:2.7.1-node
+    environment:
+      BUNDLE_JOBS: "3"
+      BUNDLE_RETRY: "3"
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      RAILS_ENV: test
+      DEVISE_JWT_SECRET_KEY: jwtdummysecret
+    steps:
+      - checkout 
+      - ruby/install-deps
+      - run:
+          name: Standardrb linter
+          command: bundle exec Standardrb
+      - run:
+          name: Scan for Rails code vulnerabilities by Brakeman
+          command: |
+            gem install brakeman
+            bundle exec brakeman -w1
+      - run:
+          name: Scan for Rails code vulnerabilities by Bundler-audit
+          command: |
+            gem install bundler-audit
+            bundle exec bundler-audit
+      - run:
+          name: Scan for Ruby and RubyGems system vulnerabilities
+          command: |
+            bundle add ruby_audit --group "test"
+            bundle exec ruby-audit check
+      - run:
+          name: Analyze Ruby code quality
+          command: |
+            gem install rubycritic
+            rubycritic --minimum-score 90 --format json --no-browser app            
+      - run:
+          name: Scan for Rails code vulnerabilities by Fasterer
+          command: bundle exec fasterer        
+
+# We use workflows to orchestrate the jobs that we declared above.
+workflows:
+  version: 2
+  build_and_test:     # The name of our workflow is "build_and_test"
+    jobs:             # The list of jobs we run as part of this workflow.
+      - build:
+          filters:  # required since `deploy` has tag filters AND requires `build`
+            tags:
+              only: /.*/         # Run build first.
+      - test:         # Then run test,
+          requires:   # Test requires that build passes for it to run.
+            - build   # Finally, run the build job.
+          filters:
+            tags:
+              only: /.*/
+      - securities:
+          requires:
+            - build

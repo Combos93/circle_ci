@@ -1,0 +1,111 @@
+version: 2.1
+orbs:
+  ruby: circleci/ruby@1.0 
+
+jobs:
+  setup_and_RSpec:
+    docker:
+      - image: circleci/ruby:2.7.1-node
+        environment:
+          BUNDLER_VERSION: 2.0.1
+          BUNDLE_PATH: /bundle
+          BUNDLE_JOBS: 4
+          RAILS_ENV: test
+      - image: circleci/postgres:11
+        environment:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ege-test-test
+          DEVISE_JWT_SECRET_KEY: jwtdummysecret  
+    environment:
+      TZ: Europe/Moscow
+      BUNDLE_JOBS: "3"
+      BUNDLE_RETRY: "3"
+      PGHOST: 127.0.0.1
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      RAILS_ENV: test
+      DEVISE_JWT_SECRET_KEY: jwtdummysecret
+    steps:
+      - checkout
+      - ruby/install-deps
+      - run: sudo apt-get install libpq-dev
+      - run:
+          name: Wait for DB
+          command: dockerize -wait tcp://localhost:5432 -timeout 1m
+      - run:
+          name: Database setup
+          command: |
+            bundle exec rails db:create --trace
+            bundle exec rails db:schema:load --trace
+      - run:
+          name: Run RSpec
+          command: |
+            mkdir /tmp/test-results
+            TEST_FILES="$(circleci tests glob "spec/**/*_spec.rb" | \
+              circleci tests split --split-by=timings)"
+            bundle exec rspec \
+              --format progress \
+              --out /tmp/test-results/rspec.xml \
+              --format progress \
+              $TEST_FILES
+          when: always              
+  linter_and_securities:
+    docker:
+      - image: circleci/ruby:2.7.1-node
+    environment:
+      BUNDLER_VERSION: 2.0.1
+      BUNDLE_PATH: /bundle
+      BUNDLE_JOBS: 4
+      RAILS_ENV: test
+      CIRCLE_ARTIFACTS: /tmp
+    steps:
+      - checkout
+      - ruby/install-deps
+      - run:
+          name: Scan for Rails code vulnerabilities by Bundler-audit
+          command: |
+            gem install bundler-audit
+            bundle exec bundler-audit
+          when: always
+      - run:
+          name: Analyze Ruby code quality
+          command: |
+            gem install rubycritic
+            rubycritic --minimum-score 90 --format json --no-browser app            
+          when: always
+      - run:
+          name: Scan for Rails code vulnerabilities by Fasterer
+          command: bundle exec fasterer        
+          when: always
+      - run:
+          name: Scan for Rails code vulnerabilities by Brakeman
+          command: |
+            gem install brakeman
+            bundle exec brakeman -w1
+          when: always
+      - run:
+          name: Scan for Ruby and RubyGems system vulnerabilities
+          command: |
+            bundle add ruby_audit --group "test"
+            bundle exec ruby-audit check
+          when: always
+      - run:
+          name: Standardrb linter
+          command: bundle exec standardrb 
+          when: always
+
+workflows:
+  version: 2
+  check_specs_and_code:
+    jobs:
+      - setup_and_RSpec:
+          filters:
+            tags:
+              only: /.*/
+              ignore: /.md/
+      - linter_and_securities:
+          filters:
+            tags:
+              only: /.*/
+              ignore: /.md/
